@@ -1,0 +1,80 @@
+--- a/support/Makefile.in
++++ b/support/Makefile.in
+@@ -60,7 +60,7 @@ checkgid: $(checkgid_OBJECTS)
+
+ suexec_OBJECTS = suexec.lo
+ suexec: $(suexec_OBJECTS)
+-       $(LINK) $(suexec_OBJECTS)
++       $(LINK) -ldl $(suexec_OBJECTS)
+
+ htcacheclean_OBJECTS = htcacheclean.lo
+ htcacheclean: $(htcacheclean_OBJECTS)
+--- a/support/suexec.c  2014-05-21 10:00:24.690591355 +0100
++++ b/support/suexec.c  2014-05-21 09:59:24.026591412 +0100
+@@ -55,6 +55,9 @@
+ #include <grp.h>
+ #endif
+
++#include <dlfcn.h>
++#include <lve/lve-ctl.h>
++
+ /*
+  ***********************************************************************
+  * There is no initgroups() in QNX, so I believe this is safe :-)
+@@ -466,6 +469,56 @@ int main(int argc, char *argv[])
+         exit(108);
+     }
+
++    /* hostinger */
++    void *lib_handle;
++    void *lve;              /* lve structure pointer     */
++    lib_handle = dlopen("liblve.so.0", RTLD_LAZY);
++    if (lib_handle) {
++        char *error; char error_msg[1024];
++        int (*_lve_enter_flags)(void *, uint32_t, uint32_t *, uint32_t) = NULL;
++        int (*_lve_instance_init)(void *) = NULL;
++        int (*_is_in_lve)(struct liblve*) = NULL;
++
++        dlerror();    /* Clear any existing error */
++        _lve_enter_flags = dlsym(lib_handle, "lve_enter_flags");
++        _lve_instance_init = dlsym(lib_handle, "lve_instance_init");
++        _is_in_lve = dlsym(lib_handle, "is_in_lve");
++
++        if ((error = dlerror()) != NULL) {
++          log_err("failed to init LVE library (function lve_enter_flags) %s\n", error);
++          _lve_enter_flags = NULL;
++        }
++
++        if ((error = dlerror()) != NULL) {
++          log_err("failed to init LVE library (function lve_instance_init) %s\n", error);
++          _lve_instance_init = NULL;
++        }
++
++        int (*jail)(struct passwd *, int, char*) = dlsym(lib_handle, "lve_jail_uid");
++        if ((error = dlerror()) != NULL) {
++            log_err("failed to init LVE library %s\n", error);
++            exit(130);
++        }
++
++        // Before jail put it into LVE if need
++        if(_lve_enter_flags && _lve_instance_init){
++          int lve_rc;
++          errno = 0;
++          lve = malloc(_lve_instance_init(NULL));
++          lve_rc = _lve_instance_init(lve);
++          if (lve_rc || errno){
++            log_err("failed to init LVE instance %d\n", errno);
++          } else {
++            uint32_t lve_cookie;
++            if(uid > 0) {
++              errno = 0;
++              if(!_is_in_lve(lve))
++                _lve_enter_flags(lve, (uint32_t)uid, &lve_cookie, 0);
++            }
++          }
++        }
++    }
++
+     /*
+      * Change UID/GID here so that the following tests work over NFS.
+      *
